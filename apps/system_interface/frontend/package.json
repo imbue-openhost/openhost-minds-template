@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "dockview-core": "^5.2.0",
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.12",
     "marked": "^17.0.4",
     "mithril": "^2.2.7"
   },

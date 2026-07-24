@@ -2,6 +2,8 @@ import json
 import os
 import queue
 import shlex
+import subprocess
+import sys
 import threading
 import tomllib
 from pathlib import Path
@@ -67,6 +69,35 @@ _DEFAULT_MNGR_BINARY = "mngr"
 _UPDATE_PENDING_PATH_ENV_VAR = "OPENHOST_UPDATE_PENDING_PATH"
 _INCOMING_REF_ENV_VAR = "OPENHOST_TEMPLATE_INCOMING_REF"
 _DEFAULT_INCOMING_REF = "refs/openhost/incoming"
+
+_REAP_SCRIPT = "scripts/reap_stale_worker_state.py"
+_REAP_TIMEOUT_SECONDS = 60.0
+
+
+def _reap_stale_worker_state() -> None:
+    """Run the stranded-state reaper, best-effort.
+
+    Its own marker makes it a no-op after the first run in a container, so
+    calling it on every service start is cheap. Never fatal: a workspace that
+    cannot reap is still a workspace that should boot.
+    """
+    script = Path(_REAP_SCRIPT)
+    if not script.is_file():
+        return
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--once-per-container"],
+            capture_output=True,
+            text=True,
+            timeout=_REAP_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("Could not run the stranded-state reaper: {}", e)
+        return
+    if result.returncode != 0:
+        logger.warning("Stranded-state reaper exited {}: {}", result.returncode, result.stderr.strip())
+    elif result.stdout.strip():
+        logger.info("Stranded-state reaper: {}", result.stdout.strip())
 # The production messenger: a stateless, frozen value whose discover/send are the
 # real mngr calls, so one shared instance is the default for every built manager.
 _DEFAULT_MESSENGER: Final[MngrMessenger] = MngrMessenger()
@@ -429,6 +460,12 @@ class AgentManager:
         """Start the observe subprocess and perform initial agent discovery."""
         self._initial_discover()
         self._start_observe()
+        # Release worker agents and tickets stranded by a container restart,
+        # before anything below can trip over them (the update prompt at the
+        # end of this method sends the mind straight into a skill whose
+        # single-flight check reads those tickets). No-op after the first run
+        # in a given container.
+        _reap_stale_worker_state()
         self._chat_reviver.start()
         # Seed the reviver with the discovery snapshot so chats already dead at
         # startup (e.g. after a container reboot) are revived without waiting
